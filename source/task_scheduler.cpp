@@ -333,7 +333,7 @@ void TaskScheduler::Run(uint fiberPoolSize, TaskFunction mainTask, void *mainTas
 
 void TaskScheduler::AddTask(Task task, AtomicCounter *counter) {
 	if (counter != nullptr) {
-		counter->Store(1);
+		counter->FetchAdd(1, std::memory_order_acq_rel);
 	}
 
 	const TaskBundle bundle = {task, counter};
@@ -356,7 +356,7 @@ void TaskScheduler::AddTask(Task task, AtomicCounter *counter) {
 
 void TaskScheduler::AddTasks(uint numTasks, Task *tasks, AtomicCounter *counter) {
 	if (counter != nullptr) {
-		counter->Store(numTasks);
+		counter->FetchAdd(numTasks, std::memory_order_acq_rel);
 	}
 
 	ThreadLocalStorage &tls = m_tls[GetCurrentThreadIndex()];
