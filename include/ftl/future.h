@@ -1,0 +1,370 @@
+/**
+ * FiberTaskingLib - A tasking library that uses fibers for efficient task switching
+ *
+ * This library was created as a proof of concept of the ideas presented by
+ * Christian Gyrling in his 2015 GDC Talk 'Parallelizing the Naughty Dog Engine Using Fibers'
+ *
+ * http://gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine
+ *
+ * FiberTaskingLib is the legal property of Adrian Astley
+ * Copyright Adrian Astley 2015 - 2018
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <atomic>
+#include <functional>
+
+#include "ftl/atomic_counter.h"
+#include "ftl/task_scheduler.h"
+
+namespace ftl {
+	//////////////////////////////
+	// ftl::detail::SharedState //
+	//////////////////////////////
+
+	namespace detail {
+		template<class T>
+		struct SharedState {
+			std::function<T()> m_functor;
+			T m_data;
+			std::exception_ptr m_exception;
+			std::atomic<std::uint8_t> m_refs;
+		};
+
+		template<>
+		struct SharedState<void> {
+			std::function<void()> m_functor;
+			std::exception_ptr m_exception;
+			std::atomic<std::uint8_t> m_refs;
+		};
+	}
+
+	/////////////////
+	// ftl::Future //
+	/////////////////
+
+	namespace detail {
+		template<class T>
+		class PromiseBase;
+
+		template<class T>
+		class FutureBase {
+		public:
+			FutureBase() = default;
+			FutureBase(FutureBase const&) = delete;
+			FutureBase(FutureBase&& that) {
+				swap(*this, that);
+			};
+			FutureBase& operator=(FutureBase const&) = delete;
+			FutureBase& operator=(FutureBase&& that) {
+				swap(*this, that);
+			};
+
+			bool valid() const noexcept {
+				return m_state != nullptr;
+			}
+
+			bool ready() const noexcept {
+				return valid() && m_state->m_refs.load(std::memory_order_acquire) == 1;
+			}
+
+			void wait(bool const pinToThread = false) const {
+				if (!valid()) {
+					throw std::logic_error("Future must have state in order to wait() or get()");
+				}
+				if (!ready()) {
+					m_scheduler->WaitForCounter(m_counter, m_wait_val, pinToThread);
+				}
+			}
+
+			// get() in children
+
+			~FutureBase() {
+				if (m_state) {
+					std::uint8_t const old = m_state->m_refs.fetch_sub(1, std::memory_order_acq_rel);
+					if (old == 1) {
+						// Work is done, promise doesn't exist, just delete.
+						delete m_state;
+						m_state = nullptr;
+					}
+					else {
+						// Work isn't done don't delete anything.
+					}
+				}
+			}
+
+			template<class FB_T>
+			friend void swap(FutureBase<FB_T>& lhs, FutureBase<FB_T>& rhs) noexcept {
+				using std::swap;
+
+				swap(lhs.m_state, rhs.m_state);
+				swap(lhs.m_scheduler, rhs.m_scheduler);
+				swap(lhs.m_counter, rhs.m_counter);
+				swap(lhs.m_wait_val, rhs.m_wait_val);
+			}
+
+		protected:
+			friend PromiseBase<T>;
+
+			FutureBase(SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+				: m_state(state),
+			      m_scheduler(scheduler),
+			      m_counter(counter),
+			      m_wait_val(waitVal) {}
+
+			void conditional_throw() {
+				if (m_state && m_state->m_exception != nullptr) {
+					std::rethrow_exception(m_state->m_exception);
+				}
+			}
+
+			SharedState<T>* m_state;
+			TaskScheduler* m_scheduler;
+			AtomicCounter* m_counter;
+			std::size_t m_wait_val;
+		};
+	}
+
+	template<class T>
+	class Future : public detail::FutureBase<T> {
+	public:
+		T get(bool pinToThread = true) {
+			// Work in progress, wait
+			this->wait();
+
+			this->conditional_throw();
+
+			T tmp = std::move(this->m_state->m_data);
+
+			// We are the only owners of the shared state because wait() will only return after the entire task is done.
+			delete this->m_state;
+			this->m_state = nullptr;
+
+			return std::move(tmp);
+		}
+
+	private:
+		Future(detail::SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+	};
+
+	template<class T>
+	class Future<T&> : public detail::FutureBase<T&> {
+	public:
+		T& get(bool pinToThread = true) {
+			// Work in progress, wait
+			this->wait();
+
+			this->conditional_throw();
+
+			T& tmp = this->m_state->m_data;
+
+			// We are the only owners of the shared state because wait() will only return after the entire task is done.
+			delete this->m_state;
+			this->m_state = nullptr;
+
+			return tmp;
+		}
+
+	private:
+		Future(detail::SharedState<T&>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+
+
+	};
+
+	template<>
+	class Future<void> : public detail::FutureBase<void> {
+	public:
+		void get(bool pinToThread = true) {
+			// Work in progress, wait
+			this->wait();
+
+			this->conditional_throw();
+
+			// We are the only owners of the shared state because wait() will only return after the entire task is done.
+			delete this->m_state;
+			this->m_state = nullptr;
+		}
+
+	private:
+		Future(detail::SharedState<void>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+	};
+
+	//////////////////
+	// ftl::Promise //
+	//////////////////
+
+	namespace detail {
+		template<class T>
+		class PromiseBase {
+		public:
+			PromiseBase() = default;
+			PromiseBase(PromiseBase const&) = delete;
+			PromiseBase(PromiseBase&& that) noexcept {
+				swap(*this, that);
+			};
+			PromiseBase& operator=(PromiseBase const&) = delete;
+			PromiseBase& operator=(PromiseBase&& that) noexcept {
+				swap(*this, that);
+			};
+
+		protected:
+			bool valid() const noexcept {
+				return m_state != nullptr;
+			}
+
+			void assert_state() const {
+				if (!valid()) {
+					throw std::logic_error("Promises must have state to set a value");
+				}
+			}
+
+			void clear_state() {
+				std::uint8_t const old = m_state->m_refs.fetch_sub(1, std::memory_order_acq_rel);
+				if (old == 1) {
+					// No future waiting for result, just kill state off.
+					delete m_state;
+				}
+				m_state = nullptr;
+			}
+
+		public:
+			Future<T> get_future() {
+				assert_state();
+
+				std::uint8_t const old = m_state->m_refs.fetch_add(1, std::memory_order_acq_rel);
+				assert(old == 1);
+
+				return Future<T>(m_state, m_scheduler, m_counter, m_wait_val);
+			}
+
+			// set_value in children
+
+			void set_exception(std::exception_ptr e_ptr) {
+				assert_state();
+
+				m_state->m_exception = e_ptr;
+
+				clear_state();
+			}
+
+			~PromiseBase() {
+				if (valid()) {
+					clear_state();
+				}
+			}
+
+			template<class PB_T>
+			friend void swap(PromiseBase<PB_T>& lhs, PromiseBase<PB_T>& rhs) noexcept {
+				using std::swap;
+
+				swap(lhs.m_state, rhs.m_state);
+				swap(lhs.m_scheduler, rhs.m_scheduler);
+				swap(lhs.m_counter, rhs.m_counter);
+				swap(lhs.m_wait_val, rhs.m_wait_val);
+			}
+
+		protected:
+			PromiseBase(SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+				: m_state(state),
+				  m_scheduler(scheduler),
+				  m_counter(counter),
+				  m_wait_val(waitVal) {}
+
+			SharedState<T>* m_state;
+			TaskScheduler* m_scheduler;
+			AtomicCounter* m_counter;
+			std::size_t m_wait_val;
+		};
+	}
+
+	template<class T>
+	class Promise : public detail::PromiseBase<T> {
+	public:
+		void set_value(T const& value) {
+			this->assert_state();
+
+			this->m_state->m_data = value;
+
+			this->clear_state();
+		}
+		void set_value(T&& value) {
+			this->assert_state();
+
+			this->m_state->m_data = std::move(value);
+
+			this->clear_state();
+		}
+	private:
+		template<class F, class... Args>
+		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
+			-> decltype(func(std::forward<Args>(args)...));
+
+		Promise(detail::SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+	};
+
+	template<class T>
+	class Promise<T&> : public detail::PromiseBase<T&> {
+	public:
+		void set_value(T& value) {
+			this->assert_state();
+
+			this->m_state->m_data = value;
+
+			this->clear_state();
+		}
+	private:
+		template<class F, class... Args>
+		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
+			-> decltype(func(std::forward<Args>(args)...));
+
+		Promise(detail::SharedState<T&>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+	};
+
+	class Promise<void> : public detail::PromiseBase<void> {
+	public:
+		void set_value() {
+			this->assert_state();
+
+			this->clear_state();
+		}
+	private:
+		template<class F, class... Args>
+		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
+			-> decltype(func(std::forward<Args>(args)...));
+
+		Promise(detail::SharedState<void>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
+			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+	};
+
+	namespace detail {
+		template<class F, class... Args>
+		auto create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
+			-> decltype(func(std::forward<Args>(args)...)) {
+			using RetVal = decltype(func(std::forward<Args>(args)...));
+
+			SharedState<RetVal>* state = new SharedState<RetVal>();
+			state->m_refs.store(1, std::memory_order_release);
+			state->m_functor = std::bind(func, std::forward<Args>(args)...);
+
+			return Promise<RetVal>(state, scheduler, counter, waitVal);
+		}
+	}
+}

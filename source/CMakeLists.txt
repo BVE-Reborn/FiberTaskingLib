@@ -80,6 +80,7 @@ SetSourceGroup(NAME Util
 	PREFIX FTL
 	SOURCE_FILES ../include/ftl/config.h
 	             ../include/ftl/fiber.h
+				 ../include/ftl/future.h
 	             ../include/ftl/thread_abstraction.h
 	             ../include/ftl/wait_free_queue.h
 				 ../include/ftl/ftl_valgrind.h
