@@ -29,9 +29,9 @@
 
 
 namespace ftl {
-
-AtomicCounter::AtomicCounter(TaskScheduler *taskScheduler, uint initialValue, uint fiberSlots)
+AtomicCounter::AtomicCounter(TaskScheduler *taskScheduler, uint initialValue, uint fiberSlots, AtomicCounter *parent)
 		: m_taskScheduler(taskScheduler),
+		  m_parent(parent),
 		  m_value(initialValue),
 		  m_lock(0),
 		  m_waitingFibers(fiberSlots) {

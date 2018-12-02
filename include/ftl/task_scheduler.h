@@ -25,6 +25,7 @@
 #pragma once
 
 #include "ftl/fiber.h"
+#include "ftl/future.h"
 #include "ftl/task.h"
 #include "ftl/thread_abstraction.h"
 #include "ftl/typedefs.h"
@@ -33,6 +34,7 @@
 #include <atomic>
 #include <climits>
 #include <condition_variable>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -202,7 +204,7 @@ public:
 	 * @param task       The task to queue
 	 * @param counter    An atomic counter corresponding to this task. Initially it will be set to 1. When the task completes, it will be decremented.
 	 */
-	void AddTask(Task task, AtomicCounter *counter = nullptr);
+	uint AddTask(Task task, AtomicCounter* counter = nullptr);
 	/**
 	 * Adds a group of tasks to the internal queue
 	 *
@@ -211,6 +213,32 @@ public:
 	 * @param counter     An atomic counter corresponding to the task group as a whole. Initially it will be set to numTasks. When each task completes, it will be decremented.
 	 */
 	void AddTasks(uint numTasks, Task *tasks, AtomicCounter *counter = nullptr);
+
+	template<class F, class... Args>
+	auto AddTypedTask(F& f, Args&& args) -> Future<decltype(f(std::forward<Args>(args)...))> {
+		using RetVal = decltype(f(std::forward<Args>(args)...));
+
+		Promise<RetVal>* promise = detail::create_promise(this, nullptr, 0, f, std::forward<Args>(args)...);
+
+		AddTask(Task{detail::TypeSafeTask<RetVal>::run, promise}, promise->get_counter());
+	}
+
+	template<class F, class... Args>
+	auto AddTypedTask(AtomicCounter* counter, F& f, Args&& args) -> Future<decltype(f(std::forward<Args>(args)...))> {
+		if (!counter) {
+			return AddTypedTask(f, std::forward<Args>(args)...);
+		}
+
+		using RetVal = decltype(f(std::forward<Args>(args)...));
+
+		Promise<RetVal>* promise = detail::create_promise(this, nullptr, 0, f, std::forward<Args>(args)...);
+
+		Promise<RetVal> future = promise->get_future();
+
+		AddTask(Task{detail::TypeSafeTask<RetVal>, promise}, promise->get_counter());
+
+		return std::move(future);
+	}
 
 	/**
 	 * Yields execution to another task until counter == value

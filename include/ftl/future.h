@@ -38,16 +38,18 @@ namespace ftl {
 	namespace detail {
 		template<class T>
 		struct SharedState {
-			std::function<T()> m_functor;
+			std::function<T(TaskScheduler*)> m_functor;
 			T m_data;
 			std::exception_ptr m_exception;
+			std::unique_ptr<AtomicCounter> m_counter;
 			std::atomic<std::uint8_t> m_refs;
 		};
 
 		template<>
 		struct SharedState<void> {
-			std::function<void()> m_functor;
+			std::function<void(TaskScheduler*)> m_functor;
 			std::exception_ptr m_exception;
+			std::unique_ptr<AtomicCounter> m_counter;
 			std::atomic<std::uint8_t> m_refs;
 		};
 	}
@@ -97,11 +99,10 @@ namespace ftl {
 					std::uint8_t const old = m_state->m_refs.fetch_sub(1, std::memory_order_acq_rel);
 					if (old == 1) {
 						// Work is done, promise doesn't exist, just delete.
-						delete m_state;
-						m_state = nullptr;
+						discard_state();
 					}
 					else {
-						// Work isn't done don't delete anything.
+						// Work isn't done don't delete anything. Promise will delete it.
 					}
 				}
 			}
@@ -131,6 +132,11 @@ namespace ftl {
 				}
 			}
 
+			void discard_state() {
+				delete this->m_state;
+				this->m_state = nullptr;
+			}
+
 			SharedState<T>* m_state;
 			TaskScheduler* m_scheduler;
 			AtomicCounter* m_counter;
@@ -141,17 +147,16 @@ namespace ftl {
 	template<class T>
 	class Future : public detail::FutureBase<T> {
 	public:
-		T get(bool pinToThread = true) {
+		T get(bool pinToThread = false) {
 			// Work in progress, wait
-			this->wait();
+			this->wait(pinToThread);
 
 			this->conditional_throw();
 
 			T tmp = std::move(this->m_state->m_data);
 
 			// We are the only owners of the shared state because wait() will only return after the entire task is done.
-			delete this->m_state;
-			this->m_state = nullptr;
+			this->discard_state();
 
 			return std::move(tmp);
 		}
@@ -164,17 +169,16 @@ namespace ftl {
 	template<class T>
 	class Future<T&> : public detail::FutureBase<T&> {
 	public:
-		T& get(bool pinToThread = true) {
+		T& get(bool pinToThread = false) {
 			// Work in progress, wait
-			this->wait();
+			this->wait(pinToThread);
 
 			this->conditional_throw();
 
 			T& tmp = this->m_state->m_data;
 
 			// We are the only owners of the shared state because wait() will only return after the entire task is done.
-			delete this->m_state;
-			this->m_state = nullptr;
+			this->discard_state();
 
 			return tmp;
 		}
@@ -189,15 +193,14 @@ namespace ftl {
 	template<>
 	class Future<void> : public detail::FutureBase<void> {
 	public:
-		void get(bool pinToThread = true) {
+		void get(bool pinToThread = false) {
 			// Work in progress, wait
-			this->wait();
+			this->wait(pinToThread);
 
 			this->conditional_throw();
 
 			// We are the only owners of the shared state because wait() will only return after the entire task is done.
-			delete this->m_state;
-			this->m_state = nullptr;
+			this->discard_state();
 		}
 
 	private:
@@ -261,6 +264,18 @@ namespace ftl {
 				m_state->m_exception = e_ptr;
 
 				clear_state();
+			}
+
+			std::function<T(TaskScheduler*)> get_function() const {
+				assert_state();
+
+				return m_state->m_functor;
+			}
+
+			AtomicCounter* get_counter() const {
+				assert_state();
+
+				return m_counter;
 			}
 
 			~PromiseBase() {
@@ -357,14 +372,55 @@ namespace ftl {
 	namespace detail {
 		template<class F, class... Args>
 		auto create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
-			-> decltype(func(std::forward<Args>(args)...)) {
+			-> Promise<decltype(func(std::forward<Args>(args)...))>* {
 			using RetVal = decltype(func(std::forward<Args>(args)...));
 
 			SharedState<RetVal>* state = new SharedState<RetVal>();
 			state->m_refs.store(1, std::memory_order_release);
-			state->m_functor = std::bind(func, std::forward<Args>(args)...);
+			state->m_functor = std::bind(func, std::placeholders::_1, std::forward<Args>(args)...);
 
-			return Promise<RetVal>(state, scheduler, counter, waitVal);
+			AtomicCounter* used_counter;
+			if (!counter) {
+				state->m_counter = std::unique_ptr<AtomicCounter>(new AtomicCounter{scheduler, 0, 1, nullptr});
+				used_counter = state->m_counter.get();
+			}
+			else {
+				used_counter = counter;
+			}
+
+			return new Promise<RetVal>(state, scheduler, used_counter, waitVal);
+		}
+
+
+		template<class T>
+		void TypeSafeTask(TaskScheduler* scheduler, void *promise_vptr) {
+			auto* promise_ptr = reinterpret_cast<Promise<T>*>(promise_vptr);
+			auto& promise = *promise_ptr;
+
+			try {
+				promise.set_value(promise.get_function()(scheduler));
+			}
+			catch (...) {
+				promise.set_exception(std::current_exception());
+			}
+
+			delete promise_ptr;
+		}
+
+		template<>
+		inline void TypeSafeTask<void>(TaskScheduler* scheduler, void *promise_vptr) {
+			auto* promise_ptr = reinterpret_cast<Promise<void>*>(promise_vptr);
+			auto& promise = *promise_ptr;
+
+			try {
+				promise.get_function()(scheduler);
+				promise.set_value();
+			}
+			catch (...) {
+				promise.set_exception(std::current_exception());
+			}
+
+			delete promise_ptr;
 		}
 	}
 }

@@ -331,9 +331,10 @@ void TaskScheduler::Run(uint fiberPoolSize, TaskFunction mainTask, void *mainTas
 	return;
 }
 
-void TaskScheduler::AddTask(Task task, AtomicCounter *counter) {
+uint TaskScheduler::AddTask(Task task, AtomicCounter* counter) {
+	uint old = 0;
 	if (counter != nullptr) {
-		counter->FetchAdd(1, std::memory_order_acq_rel);
+		old = counter->FetchAdd(1, std::memory_order_acq_rel);
 	}
 
 	const TaskBundle bundle = {task, counter};
@@ -352,6 +353,8 @@ void TaskScheduler::AddTask(Task task, AtomicCounter *counter) {
 			}
 		}
 	}
+
+	return old;
 }
 
 void TaskScheduler::AddTasks(uint numTasks, Task *tasks, AtomicCounter *counter) {
