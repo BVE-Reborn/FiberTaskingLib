@@ -24,13 +24,24 @@
 
 #pragma once
 
+#ifndef FTL_INCLUDED_TASK_SCHEDULER_H
+	#error "Cannot include future.h directly, include task_scheduler.h"
+#endif
+
 #include <atomic>
 #include <functional>
 
 #include "ftl/atomic_counter.h"
-#include "ftl/task_scheduler.h"
 
 namespace ftl {
+	template<class T>
+	class Future;
+
+	template<class T>
+	class Promise;
+
+	inline void wait_on_counter_forwarder(TaskScheduler* s, AtomicCounter *counter, uint value, bool pinToCurrentThread = false);
+
 	//////////////////////////////
 	// ftl::detail::SharedState //
 	//////////////////////////////
@@ -88,7 +99,7 @@ namespace ftl {
 					throw std::logic_error("Future must have state in order to wait() or get()");
 				}
 				if (!ready()) {
-					m_scheduler->WaitForCounter(m_counter, m_wait_val, pinToThread);
+					wait_on_counter_forwarder(m_scheduler, m_counter, m_wait_val, pinToThread);
 				}
 			}
 
@@ -108,18 +119,9 @@ namespace ftl {
 			}
 
 			template<class FB_T>
-			friend void swap(FutureBase<FB_T>& lhs, FutureBase<FB_T>& rhs) noexcept {
-				using std::swap;
-
-				swap(lhs.m_state, rhs.m_state);
-				swap(lhs.m_scheduler, rhs.m_scheduler);
-				swap(lhs.m_counter, rhs.m_counter);
-				swap(lhs.m_wait_val, rhs.m_wait_val);
-			}
+			friend void swap(FutureBase<FB_T>& lhs, FutureBase<FB_T>& rhs) noexcept;
 
 		protected:
-			friend PromiseBase<T>;
-
 			FutureBase(SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
 				: m_state(state),
 			      m_scheduler(scheduler),
@@ -142,6 +144,16 @@ namespace ftl {
 			AtomicCounter* m_counter;
 			std::size_t m_wait_val;
 		};
+
+		template<class FB_T>
+		void swap(FutureBase<FB_T>& lhs, FutureBase<FB_T>& rhs) noexcept {
+			using std::swap;
+
+			swap(lhs.m_state, rhs.m_state);
+			swap(lhs.m_scheduler, rhs.m_scheduler);
+			swap(lhs.m_counter, rhs.m_counter);
+			swap(lhs.m_wait_val, rhs.m_wait_val);
+		}
 	}
 
 	template<class T>
@@ -162,8 +174,10 @@ namespace ftl {
 		}
 
 	private:
+		friend detail::PromiseBase<T>;
+
 		Future(detail::SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+			: detail::FutureBase<T>(state, scheduler, counter, waitVal) {}
 	};
 
 	template<class T>
@@ -184,8 +198,10 @@ namespace ftl {
 		}
 
 	private:
+		friend detail::PromiseBase<T&>;
+
 		Future(detail::SharedState<T&>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+			: detail::FutureBase<T&>(state, scheduler, counter, waitVal) {}
 
 
 	};
@@ -204,8 +220,10 @@ namespace ftl {
 		}
 
 	private:
+		friend detail::PromiseBase<void>;
+
 		Future(detail::SharedState<void>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::FutureBase(state, scheduler, counter, waitVal) {}
+			: FutureBase<void>(state, scheduler, counter, waitVal) {}
 	};
 
 	//////////////////
@@ -266,16 +284,20 @@ namespace ftl {
 				clear_state();
 			}
 
-			std::function<T(TaskScheduler*)> get_function() const {
+			std::function<T(TaskScheduler*)> function() const {
 				assert_state();
 
 				return m_state->m_functor;
 			}
 
-			AtomicCounter* get_counter() const {
+			AtomicCounter* counter() const {
 				assert_state();
 
 				return m_counter;
+			}
+
+			void wait_val(std::size_t v) {
+				m_wait_val = v;
 			}
 
 			~PromiseBase() {
@@ -285,28 +307,38 @@ namespace ftl {
 			}
 
 			template<class PB_T>
-			friend void swap(PromiseBase<PB_T>& lhs, PromiseBase<PB_T>& rhs) noexcept {
-				using std::swap;
-
-				swap(lhs.m_state, rhs.m_state);
-				swap(lhs.m_scheduler, rhs.m_scheduler);
-				swap(lhs.m_counter, rhs.m_counter);
-				swap(lhs.m_wait_val, rhs.m_wait_val);
-			}
+			friend void swap(PromiseBase<PB_T>& lhs, PromiseBase<PB_T>& rhs) noexcept;
 
 		protected:
 			PromiseBase(SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
 				: m_state(state),
-				  m_scheduler(scheduler),
-				  m_counter(counter),
-				  m_wait_val(waitVal) {}
+				m_scheduler(scheduler),
+				m_counter(counter),
+				m_wait_val(waitVal) {}
 
 			SharedState<T>* m_state;
 			TaskScheduler* m_scheduler;
 			AtomicCounter* m_counter;
 			std::size_t m_wait_val;
 		};
+
+		template<class PB_T>
+		void swap(PromiseBase<PB_T>& lhs, PromiseBase<PB_T>& rhs) noexcept {
+			using std::swap;
+
+			swap(lhs.m_state, rhs.m_state);
+			swap(lhs.m_scheduler, rhs.m_scheduler);
+			swap(lhs.m_counter, rhs.m_counter);
+			swap(lhs.m_wait_val, rhs.m_wait_val);
+		}
+
+		// Forward decl for friend functions below.
+		template<class F, class... Args>
+		auto create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
+			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>*;
 	}
+
+
 
 	template<class T>
 	class Promise : public detail::PromiseBase<T> {
@@ -328,10 +360,10 @@ namespace ftl {
 	private:
 		template<class F, class... Args>
 		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
-			-> decltype(func(std::forward<Args>(args)...));
+			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>*;
 
 		Promise(detail::SharedState<T>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+			: detail::PromiseBase<T>(state, scheduler, counter, waitVal) {}
 	};
 
 	template<class T>
@@ -347,12 +379,13 @@ namespace ftl {
 	private:
 		template<class F, class... Args>
 		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
-			-> decltype(func(std::forward<Args>(args)...));
+			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>*;
 
 		Promise(detail::SharedState<T&>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+			: detail::PromiseBase<T&>(state, scheduler, counter, waitVal) {}
 	};
 
+	template<>
 	class Promise<void> : public detail::PromiseBase<void> {
 	public:
 		void set_value() {
@@ -363,17 +396,17 @@ namespace ftl {
 	private:
 		template<class F, class... Args>
 		friend auto detail::create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
-			-> decltype(func(std::forward<Args>(args)...));
+			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>*;
 
 		Promise(detail::SharedState<void>* state, TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal)
-			: detail::PromiseBase(state, scheduler, counter, waitVal) {}
+			: detail::PromiseBase<void>(state, scheduler, counter, waitVal) {}
 	};
 
 	namespace detail {
 		template<class F, class... Args>
 		auto create_promise(TaskScheduler* scheduler, AtomicCounter* counter, std::size_t waitVal, F& func, Args&&... args)
-			-> Promise<decltype(func(std::forward<Args>(args)...))>* {
-			using RetVal = decltype(func(std::forward<Args>(args)...));
+			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>* {
+			using RetVal = decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...));
 
 			SharedState<RetVal>* state = new SharedState<RetVal>();
 			state->m_refs.store(1, std::memory_order_release);
@@ -398,7 +431,7 @@ namespace ftl {
 			auto& promise = *promise_ptr;
 
 			try {
-				promise.set_value(promise.get_function()(scheduler));
+				promise.set_value(promise.function()(scheduler));
 			}
 			catch (...) {
 				promise.set_exception(std::current_exception());
@@ -413,7 +446,7 @@ namespace ftl {
 			auto& promise = *promise_ptr;
 
 			try {
-				promise.get_function()(scheduler);
+				promise.function()(scheduler);
 				promise.set_value();
 			}
 			catch (...) {

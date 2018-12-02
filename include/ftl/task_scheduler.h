@@ -24,6 +24,8 @@
 
 #pragma once
 
+#define FTL_INCLUDED_TASK_SCHEDULER_H
+
 #include "ftl/fiber.h"
 #include "ftl/future.h"
 #include "ftl/task.h"
@@ -38,7 +40,6 @@
 #include <memory>
 #include <mutex>
 #include <vector>
-
 
 namespace ftl {
 
@@ -215,16 +216,20 @@ public:
 	void AddTasks(uint numTasks, Task *tasks, AtomicCounter *counter = nullptr);
 
 	template<class F, class... Args>
-	auto AddTypedTask(F& f, Args&& args) -> Future<decltype(f(std::forward<Args>(args)...))> {
-		using RetVal = decltype(f(std::forward<Args>(args)...));
+	auto AddTypedTask(F& f, Args&&... args)
+	    -> Future<decltype(f(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))> {
+		using RetVal = decltype(f(std::declval<TaskScheduler*>(), std::forward<Args>(args)...));
 
 		Promise<RetVal>* promise = detail::create_promise(this, nullptr, 0, f, std::forward<Args>(args)...);
 
-		AddTask(Task{detail::TypeSafeTask<RetVal>::run, promise}, promise->get_counter());
+		AddTask(Task{detail::TypeSafeTask<RetVal>, promise}, promise->counter());
+
+		return promise->get_future();
 	}
 
 	template<class F, class... Args>
-	auto AddTypedTask(AtomicCounter* counter, F& f, Args&& args) -> Future<decltype(f(std::forward<Args>(args)...))> {
+	auto AddTypedTask(AtomicCounter* counter, F& f, Args&&... args) 
+	    -> Future<decltype(f(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))> {
 		if (!counter) {
 			return AddTypedTask(f, std::forward<Args>(args)...);
 		}
@@ -235,7 +240,9 @@ public:
 
 		Promise<RetVal> future = promise->get_future();
 
-		AddTask(Task{detail::TypeSafeTask<RetVal>, promise}, promise->get_counter());
+		uint const old_val = AddTask(Task{detail::TypeSafeTask<RetVal>, promise}, promise->counter());
+
+		promise->wait_val(old_val);
 
 		return std::move(future);
 	}
@@ -317,5 +324,9 @@ private:
 	 */
 	static void FiberStart(void *arg);
 };
+
+inline void wait_on_counter_forwarder(TaskScheduler* s, AtomicCounter *counter, uint const value, bool const pinToCurrentThread) {
+	s->WaitForCounter(counter, value, pinToCurrentThread);
+}
 
 } // End of namespace ftl
