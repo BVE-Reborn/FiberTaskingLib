@@ -53,12 +53,14 @@ class AtomicCounter {
 #endif
 
 public:
-	explicit AtomicCounter(TaskScheduler *taskScheduler, uint initialValue = 0, uint fiberSlots = NUM_WAITING_FIBER_SLOTS);
+	explicit AtomicCounter(TaskScheduler *taskScheduler, uint initialValue = 0, uint fiberSlots = NUM_WAITING_FIBER_SLOTS, AtomicCounter * parent = nullptr);
 	~AtomicCounter();
 
 private:
 	/* The TaskScheduler this counter is associated with */
 	TaskScheduler *m_taskScheduler;
+	/* Parent Atomic Counter*/
+	AtomicCounter *m_parent;
 	/* The atomic counter holding our data */
 	std::atomic_uint m_value;
 	/* An atomic counter to ensure threads don't race in readying the fibers */
@@ -106,7 +108,7 @@ private:
 
 public:
 	/**
-	 * A wrapper over std::atomic_uint::load()
+	 * A wrapper over std::atomic_uint::load(). Does not propagate to parents.
 	 * 
 	 * The load *will* be atomic, but this function as a whole is *not* atomic
 	 * 
@@ -117,7 +119,7 @@ public:
 		return m_value.load(memoryOrder);
 	}
 	/**
-	 * A wrapper over std::atomic_uint::store()
+	 * A wrapper over std::atomic_uint::store(). Does not propagate to parents.
 	 * 
 	 * The store *will* be atomic, but this function as a whole is *not* atomic
 	 * 
@@ -131,7 +133,7 @@ public:
 		CheckWaitingFibers(x);
 	}
 	/**
-	 * A wrapper over std::atomic_uint::fetch_add()
+	 * A wrapper over std::atomic_uint::fetch_add(). Propagates to parents before changing self.
 	 * 
 	 * The fetch_add *will* be atomic, but this function as a whole is *not* atomic
 	 * 
@@ -140,6 +142,10 @@ public:
 	 * @return               The value of the counter before the addition
 	 */
 	uint FetchAdd(uint x, std::memory_order memoryOrder = std::memory_order_seq_cst) {
+		// Deal with parent first.
+		if (m_parent) {
+			m_parent->FetchAdd(x, memoryOrder);
+		}
 		// Enter shared section
 		m_lock.fetch_add(1u, std::memory_order_seq_cst);
 		const uint prev = m_value.fetch_add(x, memoryOrder);
@@ -148,7 +154,7 @@ public:
 		return prev;
 	}
 	/**
-	 * A wrapper over std::atomic_uint::fetch_sub()
+	 * A wrapper over std::atomic_uint::fetch_sub(). Propagates to parents before changing self.
 	 *
 	 * The fetch_sub *will* be atomic, but this function as a whole is *not* atomic
 	 *
@@ -157,6 +163,9 @@ public:
 	 * @return               The value of the counter before the subtraction
 	 */
 	uint FetchSub(uint x, std::memory_order memoryOrder = std::memory_order_seq_cst) {
+		if (m_parent) {
+			m_parent->FetchSub(x, memoryOrder);
+		}
 		// Enter shared section
 		m_lock.fetch_add(1u, std::memory_order_seq_cst);
 		const uint prev = m_value.fetch_sub(x, memoryOrder);
