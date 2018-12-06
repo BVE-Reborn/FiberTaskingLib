@@ -78,11 +78,17 @@ namespace ftl {
 		public:
 			FutureBase() = default;
 			FutureBase(FutureBase const&) = delete;
-			FutureBase(FutureBase&& that) {
-				swap(*this, that);
+			FutureBase(FutureBase&& that) noexcept
+			     : m_state(that.m_state),
+			       m_scheduler(that.m_scheduler),
+			       m_counter(that.m_counter),
+			       m_wait_val(that.m_wait_val) {
+				that.m_state = nullptr;
+				that.m_scheduler = nullptr;
+				that.m_counter = nullptr;
 			};
 			FutureBase& operator=(FutureBase const&) = delete;
-			FutureBase& operator=(FutureBase&& that) {
+			FutureBase& operator=(FutureBase&& that) noexcept {
 				swap(*this, that);
 			};
 
@@ -236,8 +242,14 @@ namespace ftl {
 		public:
 			PromiseBase() = default;
 			PromiseBase(PromiseBase const&) = delete;
-			PromiseBase(PromiseBase&& that) noexcept {
-				swap(*this, that);
+			PromiseBase(PromiseBase&& that) noexcept
+				: m_state(that.m_state),
+				  m_scheduler(that.m_scheduler),
+				  m_counter(that.m_counter),
+				  m_wait_val(that.m_wait_val) {
+				that.m_state = nullptr;
+				that.m_scheduler = nullptr;
+				that.m_counter = nullptr;
 			};
 			PromiseBase& operator=(PromiseBase const&) = delete;
 			PromiseBase& operator=(PromiseBase&& that) noexcept {
