@@ -29,6 +29,7 @@
 #endif
 
 #include <atomic>
+#include <cassert>
 #include <functional>
 
 #include "ftl/atomic_counter.h"
@@ -53,7 +54,16 @@ namespace ftl {
 			T m_data;
 			std::exception_ptr m_exception;
 			std::unique_ptr<AtomicCounter> m_counter;
-			std::atomic<std::uint8_t> m_refs;
+			std::atomic<std::uint8_t> m_refs{0};
+		};
+
+		template<class T>
+		struct SharedState<T&> {
+			std::function<T&(TaskScheduler*)> m_functor;
+			T* m_data;
+			std::exception_ptr m_exception;
+			std::unique_ptr<AtomicCounter> m_counter;
+			std::atomic<std::uint8_t> m_refs{0};
 		};
 
 		template<>
@@ -61,7 +71,7 @@ namespace ftl {
 			std::function<void(TaskScheduler*)> m_functor;
 			std::exception_ptr m_exception;
 			std::unique_ptr<AtomicCounter> m_counter;
-			std::atomic<std::uint8_t> m_refs;
+			std::atomic<std::uint8_t> m_refs{0};
 		};
 	}
 
@@ -195,12 +205,12 @@ namespace ftl {
 
 			this->conditional_throw();
 
-			T& tmp = this->m_state->m_data;
+			T* tmp = this->m_state->m_data;
 
 			// We are the only owners of the shared state because wait() will only return after the entire task is done.
 			this->discard_state();
 
-			return tmp;
+			return *tmp;
 		}
 
 	private:
@@ -384,7 +394,7 @@ namespace ftl {
 		void set_value(T& value) {
 			this->assert_state();
 
-			this->m_state->m_data = value;
+			this->m_state->m_data = &value;
 
 			this->clear_state();
 		}
