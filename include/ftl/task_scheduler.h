@@ -222,9 +222,11 @@ public:
 
 		Promise<RetVal>* promise = detail::create_promise(this, nullptr, 0, f, std::forward<Args>(args)...);
 
+		Future<RetVal> future = promise->get_future();
+
 		AddTask(Task{detail::TypeSafeTask<RetVal>, promise}, promise->counter());
 
-		return promise->get_future();
+		return future;
 	}
 
 	template<class F, class... Args>
