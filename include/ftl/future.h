@@ -420,7 +420,7 @@ namespace ftl {
 			-> Promise<decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...))>* {
 			using RetVal = decltype(func(std::declval<TaskScheduler*>(), std::forward<Args>(args)...));
 
-			SharedState<RetVal>* state = new SharedState<RetVal>();
+			auto* state = new SharedState<RetVal>();
 			state->m_refs.store(1, std::memory_order_release);
 			state->m_functor = std::bind(func, std::placeholders::_1, std::forward<Args>(args)...);
 
